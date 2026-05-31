@@ -174,7 +174,7 @@ function cardImage(c) {
   return null;
 }
 
-// Lit les cartes d'un board Moxfield (mainboard, sideboard, etc.) → array {name, scryfall_id}
+// Lit les cartes d'un board Moxfield (mainboard, sideboard, etc.) → array {name, quantity, scryfall_id}
 function cardsFromBoard(deck, boardName) {
   const board = (deck.boards || {})[boardName];
   if (!board || !board.cards) return [];
@@ -182,7 +182,7 @@ function cardsFromBoard(deck, boardName) {
   for (const entry of Object.values(board.cards)) {
     const c = entry && entry.card;
     if (!c) continue;
-    out.push({ name: c.name, scryfall_id: c.scryfall_id });
+    out.push({ name: c.name, quantity: entry.quantity || 1, scryfall_id: c.scryfall_id });
   }
   return out;
 }
@@ -226,23 +226,26 @@ function renderImages(cards, title) {
   resultBody.appendChild(grid);
 }
 
-// Rendu : liste plain text, regroupée par board, dédupliquée et triée alpha
+// Rendu : liste plain text au format MTGA/Moxfield "QTY NOM", groupée par board, triée alpha.
 function renderNameList(sections) {
-  // sections : { boardName: Set<name> } dans l'ordre BOARD_ORDER puis tokens
+  // sections : { boardName: Map<name, qty> } dans l'ordre BOARD_ORDER puis tokens
   const lines = [];
-  let total = 0;
+  let totalLines = 0;
+  let totalCards = 0;
   const order = [...BOARD_ORDER, "tokens"];
   for (const b of order) {
-    const set = sections[b];
-    if (!set || !set.size) continue;
-    const names = [...set].sort((a, b) => a.localeCompare(b));
+    const m = sections[b];
+    if (!m || !m.size) continue;
+    const entries = [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const boardTotal = entries.reduce((s, [, q]) => s + q, 0);
     if (lines.length) lines.push("");
-    lines.push(`== ${BOARD_LABELS[b] || b} (${names.length}) ==`);
-    lines.push(...names);
-    total += names.length;
+    lines.push(`== ${BOARD_LABELS[b] || b} (${entries.length} cartes, ${boardTotal} ex.) ==`);
+    for (const [name, qty] of entries) lines.push(`${qty} ${name}`);
+    totalLines += entries.length;
+    totalCards += boardTotal;
   }
   resultTitle.firstChild.textContent = "Liste ";
-  resultCount.textContent = total;
+  resultCount.textContent = `${totalLines} (${totalCards} ex.)`;
   resultBody.innerHTML = "";
   const pre = document.createElement("pre");
   pre.className = "namelist";
@@ -297,20 +300,26 @@ async function loadSelectedDecks(deckCheckboxes) {
 // Pour les boards Moxfield directs : collecte les noms uniques par board sur tous les decks.
 // Pour "tokens" : lance le pipeline Scryfall (lecture des cartes des boards Moxfield cochés,
 // extraction all_parts, fetch des tokens) et renvoie les noms.
+// Renvoie { boardName: Map<name, totalQuantity> } pour les boards Moxfield,
+// et pour "tokens" une Map<name, 1> (1 exemplaire de chaque token type).
 async function collectByBoard(decks, boards) {
   const sections = {};
   const moxBoards = boards.filter((b) => b !== "tokens");
   for (const b of moxBoards) {
-    sections[b] = new Set();
+    const m = new Map();
     for (const d of decks) {
       for (const c of cardsFromBoard(d, b)) {
-        if (c.name) sections[b].add(c.name);
+        if (!c.name) continue;
+        m.set(c.name, (m.get(c.name) || 0) + c.quantity);
       }
     }
+    sections[b] = m;
   }
   if (boards.includes("tokens")) {
     const tokens = await fetchTokens(decks, moxBoards.length ? moxBoards : ["mainboard", "commanders", "sideboard"]);
-    sections.tokens = new Set(tokens.map((t) => t.name).filter(Boolean));
+    const m = new Map();
+    for (const t of tokens) if (t.name) m.set(t.name, 1);
+    sections.tokens = m;
   }
   return sections;
 }
