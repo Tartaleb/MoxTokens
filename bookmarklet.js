@@ -21,6 +21,7 @@
     const folderQueue = [null]; // null = racine
     const visitedFolders = new Set();
     let apiCalls = 0;
+    let firstResponseLogged = false;
 
     while (folderQueue.length) {
       const folderId = folderQueue.shift();
@@ -40,6 +41,12 @@
           break;
         }
         const j = await r.json();
+        if (!firstResponseLogged) {
+          firstResponseLogged = true;
+          console.log("[MoxTokens] première réponse /v3/decks (clés racine) :", Object.keys(j));
+          console.log("[MoxTokens] première réponse /v3/decks (objet complet) :", j);
+          console.log("[MoxTokens] totalResults =", j.totalResults, "totalPages =", j.totalPages, "pageSize =", j.pageSize);
+        }
 
         // Collecte les decks — robuste face à plusieurs shapes possibles
         const deckArrays = [j.data, j.decks, j.items].filter(Array.isArray);
