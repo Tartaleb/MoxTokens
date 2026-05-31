@@ -1,16 +1,20 @@
-// MoxTokens — extrait les tokens de decks Moxfield publics.
+// MoxTokens — extrait tokens + listes de noms depuis tes decks Moxfield.
 //
-// L'API Moxfield refuse les requêtes navigateur cross-origin (CORS + filtre User-Agent),
-// donc tous les appels Moxfield passent par un Cloudflare Worker dédié (voir cloudflare-worker/).
-// Scryfall, lui, est CORS-friendly : on l'appelle directement quand on a besoin d'images.
+// La liste des decks vient du bookmarklet (voir bookmarklet.js) que l'utilisateur lance
+// depuis moxfield.com authentifié — ça contourne le cap des 62 decks de l'API publique.
+// Chaque deck est ensuite chargé via le proxy Cloudflare Worker (/v3/decks/all/<id>).
+// Scryfall est CORS-friendly, appelé directement.
 
 const PROXY = "https://moxtokens-proxy.froyer44000.workers.dev/?url=";
 const MOX_API = "https://api2.moxfield.com";
+const LS_KEY = "moxtokens.deckList";
 
 const $ = (id) => document.getElementById(id);
-const usernameEl = $("username");
-const loadBtn = $("loadDecks");
 const statusEl = $("status");
+const pasteStatusEl = $("pasteStatus") || statusEl;
+const pasteBtn = $("pasteFromBookmarklet");
+const clearBtn = $("clearPasted");
+const bookmarkletLink = $("bookmarklet");
 const decksSection = $("decksSection");
 const decksList = $("decksList");
 const boardsChoice = $("boardsChoice");
@@ -25,7 +29,6 @@ const resultTitle = $("resultTitle");
 const resultCount = $("resultCount");
 const resultBody = $("resultBody");
 
-// Ordre d'affichage des sections dans la sortie "liste de noms"
 const BOARD_ORDER = ["commanders", "mainboard", "sideboard", "maybeboard"];
 const BOARD_LABELS = {
   commanders: "Commanders",
@@ -36,10 +39,8 @@ const BOARD_LABELS = {
 };
 
 let allDecks = [];
-
-// ---------- persistance username ----------
-const savedUser = localStorage.getItem("moxtokens.username");
-if (savedUser) usernameEl.value = savedUser;
+const checkedDeckIds = new Set();
+let activeFormats = null;
 
 // ---------- helpers ----------
 function setStatus(text, kind = "") {
@@ -48,10 +49,12 @@ function setStatus(text, kind = "") {
   statusEl.className = "status" + (kind ? " " + kind : "");
   statusEl.innerHTML = text;
 }
+function busy(text) { setStatus(`<span class="spinner"></span>${text}`); }
 
-function busy(text) {
-  setStatus(`<span class="spinner"></span>${text}`);
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+const escapeAttr = escapeHtml;
 
 async function proxyFetch(moxPath) {
   const url = PROXY + encodeURIComponent(MOX_API + moxPath);
@@ -63,30 +66,87 @@ async function proxyFetch(moxPath) {
   return r.json();
 }
 
-// ---------- 1. lister les decks d'un user ----------
-async function loadAllDecks(username) {
-  // L'endpoint /v2/users/{name}/decks est cassé (404) côté Moxfield depuis 2026.
-  // On passe par le moteur de recherche /v2/decks/search?authorUserNames=... qui renvoie
-  // le même format paginé (data[], totalPages, etc.) et n'a pas le bug.
-  const out = [];
-  let page = 1;
-  while (true) {
-    const data = await proxyFetch(`/v2/decks/search?pageSize=100&pageNumber=${page}&authorUserNames=${encodeURIComponent(username)}`);
-    const rows = data.data || [];
-    out.push(...rows);
-    const total = data.totalPages || 1;
-    if (page >= total || rows.length === 0) break;
-    page++;
-    if (page > 50) break; // garde-fou
+// ---------- bookmarklet : on charge bookmarklet.js et on l'injecte dans le href ----------
+async function installBookmarkletLink() {
+  try {
+    const src = await fetch("bookmarklet.js").then((r) => r.text());
+    bookmarkletLink.href = "javascript:" + encodeURIComponent(src);
+  } catch (e) {
+    bookmarkletLink.textContent = "(erreur chargement bookmarklet)";
   }
-  return out;
 }
 
-// État des cases à cocher conservé entre re-rendus du filtre
-const checkedDeckIds = new Set();
-// Formats actuellement actifs (cochés dans le filtre). null = tout afficher (état initial).
-let activeFormats = null;
+// ---------- liste de decks : load depuis cache, paste, clear ----------
+function loadFromCache() {
+  const raw = localStorage.getItem(LS_KEY);
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data) || !data.length) return false;
+    allDecks = data;
+    renderFormatFilter(allDecks);
+    renderDecks(allDecks);
+    decksSection.hidden = false;
+    setStatus(`${allDecks.length} decks chargés depuis le cache local.`, "success");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
+async function readPastedList() {
+  // Essai 1 : presse-papier direct (rapide si autorisé)
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    try {
+      const txt = await navigator.clipboard.readText();
+      if (txt && txt.trim()) return txt;
+    } catch { /* permission refusée, on tombe sur prompt */ }
+  }
+  // Essai 2 : prompt utilisateur — coller à la main
+  return prompt("Colle ici la liste copiée par le bookmarklet (JSON) :", "");
+}
+
+pasteBtn.addEventListener("click", async () => {
+  const txt = await readPastedList();
+  if (!txt || !txt.trim()) { setStatus("Rien à coller.", "error"); return; }
+  let parsed;
+  try { parsed = JSON.parse(txt); }
+  catch { setStatus("JSON invalide. Recopie ce que le bookmarklet a copié.", "error"); return; }
+  if (!Array.isArray(parsed) || !parsed.length) {
+    setStatus("Liste vide ou format inattendu.", "error"); return;
+  }
+  // Normalisation : on garde publicId, name, format, lastUpdatedAtUtc
+  const decks = parsed
+    .map((d) => ({
+      publicId: d.publicId || d.id,
+      name: d.name || "(sans nom)",
+      format: d.format || "—",
+      lastUpdatedAtUtc: d.lastUpdatedAtUtc || "",
+    }))
+    .filter((d) => d.publicId);
+  if (!decks.length) { setStatus("Aucun publicId trouvé dans la liste collée.", "error"); return; }
+  localStorage.setItem(LS_KEY, JSON.stringify(decks));
+  allDecks = decks;
+  checkedDeckIds.clear();
+  activeFormats = null;
+  resultSection.hidden = true;
+  renderFormatFilter(allDecks);
+  renderDecks(allDecks);
+  decksSection.hidden = false;
+  setStatus(`${decks.length} decks chargés et mis en cache.`, "success");
+});
+
+clearBtn.addEventListener("click", () => {
+  localStorage.removeItem(LS_KEY);
+  allDecks = [];
+  checkedDeckIds.clear();
+  activeFormats = null;
+  decksSection.hidden = true;
+  resultSection.hidden = true;
+  setStatus("Cache effacé. Relance le bookmarklet et colle à nouveau.", "success");
+});
+
+// ---------- filtre par format + render decks ----------
 function renderFormatFilter(decks) {
   formatFilter.innerHTML = "";
   const counts = new Map();
@@ -111,15 +171,14 @@ function renderFormatFilter(decks) {
 function renderDecks(decks) {
   decksList.innerHTML = "";
   if (!decks.length) {
-    decksList.innerHTML = `<p class="micro">Aucun deck public trouvé pour cet utilisateur.</p>`;
+    decksList.innerHTML = `<p class="micro">Aucun deck dans le cache. Utilise le bookmarklet ci-dessus.</p>`;
     decksVisibleCount.textContent = "";
     extractListBtn.disabled = true;
     extractImagesBtn.disabled = true;
     return;
   }
-  // tri : plus récent d'abord
   const sorted = [...decks].sort((a, b) => (b.lastUpdatedAtUtc || "").localeCompare(a.lastUpdatedAtUtc || ""));
-  const dateMin = dateFilter.value; // "YYYY-MM-DD" ou ""
+  const dateMin = dateFilter.value;
   const filtered = sorted.filter((d) => {
     if (activeFormats !== null && !activeFormats.has((d.format || "—").toString())) return false;
     if (dateMin) {
@@ -131,7 +190,7 @@ function renderDecks(decks) {
   decksVisibleCount.textContent = filtered.length === decks.length ? decks.length : `${filtered.length} / ${decks.length}`;
 
   if (!filtered.length) {
-    decksList.innerHTML = `<p class="micro">Aucun deck pour les formats cochés.</p>`;
+    decksList.innerHTML = `<p class="micro">Aucun deck pour les filtres actifs.</p>`;
   } else {
     for (const d of filtered) {
       const id = d.publicId || d.id;
@@ -158,32 +217,51 @@ function renderDecks(decks) {
   extractImagesBtn.disabled = false;
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-function escapeAttr(s) { return escapeHtml(s); }
+dateFilter.addEventListener("change", () => renderDecks(allDecks));
+dateFilterClear.addEventListener("click", () => { dateFilter.value = ""; renderDecks(allDecks); });
 
-// ---------- 2. récupérer les decks + leurs cartes ----------
+$("selectAll").addEventListener("click", () => {
+  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = true;
+    checkedDeckIds.add(c.value);
+  });
+});
+$("selectNone").addEventListener("click", () => {
+  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = false;
+    checkedDeckIds.delete(c.value);
+  });
+});
+
+// ---------- chargement d'un deck individuel + extraction ----------
 async function loadDeck(publicId) {
   return proxyFetch(`/v3/decks/all/${encodeURIComponent(publicId)}`);
 }
 
-function scryfallIdsFromDeck(deck) {
-  // Récupère les scryfall_id de toutes les cartes de tous les boards (mainboard, sideboard, etc.)
-  // Moxfield ne nous donne pas les tokens directement — il faut passer par Scryfall ensuite.
-  const ids = new Set();
-  for (const board of Object.values(deck.boards || {})) {
-    if (!board || !board.cards) continue;
-    for (const entry of Object.values(board.cards)) {
-      const sid = entry && entry.card && entry.card.scryfall_id;
-      if (sid) ids.add(sid);
-    }
+function cardsFromBoard(deck, boardName) {
+  const board = (deck.boards || {})[boardName];
+  if (!board || !board.cards) return [];
+  const out = [];
+  for (const entry of Object.values(board.cards)) {
+    const c = entry && entry.card;
+    if (!c) continue;
+    out.push({ name: c.name, quantity: entry.quantity || 1, scryfall_id: c.scryfall_id });
   }
-  return [...ids];
+  return out;
 }
 
-// ---------- 3. Scryfall : bulk lookup + related-parts ----------
-// /cards/collection accepte jusqu'à 75 identifiers par requête (POST JSON).
+function selectedBoards() {
+  return [...boardsChoice.querySelectorAll('input[type="checkbox"]:checked')].map((c) => c.value);
+}
+
+function selectedDeckCheckboxes() {
+  return [...checkedDeckIds].map((id) => {
+    const d = allDecks.find((x) => (x.publicId || x.id) === id);
+    return { value: id, dataset: { name: (d && d.name) || "(sans nom)" } };
+  });
+}
+
+// ---------- Scryfall ----------
 async function scryfallCollection(ids, onProgress) {
   const out = [];
   for (let i = 0; i < ids.length; i += 75) {
@@ -202,8 +280,6 @@ async function scryfallCollection(ids, onProgress) {
   return out;
 }
 
-// Pour chaque carte récupérée, regarde all_parts[] : on garde les entrées component === "token"
-// (ainsi que "combo_piece" qui est parfois utilisé pour des emblèmes / faces alt).
 function tokenIdsFromCards(cards) {
   const ids = new Set();
   for (const c of cards) {
@@ -224,32 +300,7 @@ function cardImage(c) {
   return null;
 }
 
-// Lit les cartes d'un board Moxfield (mainboard, sideboard, etc.) → array {name, quantity, scryfall_id}
-function cardsFromBoard(deck, boardName) {
-  const board = (deck.boards || {})[boardName];
-  if (!board || !board.cards) return [];
-  const out = [];
-  for (const entry of Object.values(board.cards)) {
-    const c = entry && entry.card;
-    if (!c) continue;
-    out.push({ name: c.name, quantity: entry.quantity || 1, scryfall_id: c.scryfall_id });
-  }
-  return out;
-}
-
-function selectedBoards() {
-  return [...boardsChoice.querySelectorAll('input[type="checkbox"]:checked')].map((c) => c.value);
-}
-// Renvoie la liste des decks cochés (depuis l'état persistant, pas seulement le DOM visible)
-// pour que la sélection survive aux re-rendus du filtre par format.
-function selectedDeckCheckboxes() {
-  return [...checkedDeckIds].map((id) => {
-    const d = allDecks.find((x) => (x.publicId || x.id) === id);
-    return { value: id, dataset: { name: (d && d.name) || "(sans nom)" } };
-  });
-}
-
-// Rendu : grille d'illustrations
+// ---------- rendu des résultats ----------
 function renderImages(cards, title) {
   resultTitle.firstChild.textContent = title + " ";
   resultCount.textContent = cards.length;
@@ -281,9 +332,7 @@ function renderImages(cards, title) {
   resultBody.appendChild(grid);
 }
 
-// Rendu : liste plain text au format MTGA/Moxfield "QTY NOM", groupée par board, triée alpha.
 function renderNameList(sections) {
-  // sections : { boardName: Map<name, qty> } dans l'ordre BOARD_ORDER puis tokens
   const lines = [];
   let totalLines = 0;
   let totalCards = 0;
@@ -308,50 +357,7 @@ function renderNameList(sections) {
   resultBody.appendChild(pre);
 }
 
-// ---------- événements UI ----------
-loadBtn.addEventListener("click", async () => {
-  const username = usernameEl.value.trim();
-  if (!username) { setStatus("Saisis un username Moxfield.", "error"); return; }
-  localStorage.setItem("moxtokens.username", username);
-  loadBtn.disabled = true;
-  decksSection.hidden = true;
-  resultSection.hidden = true;
-  // reset entre deux chargements
-  checkedDeckIds.clear();
-  activeFormats = null;
-  try {
-    busy(`Chargement des decks de <strong>${escapeHtml(username)}</strong>…`);
-    allDecks = await loadAllDecks(username);
-    setStatus(`${allDecks.length} deck${allDecks.length > 1 ? "s" : ""} public${allDecks.length > 1 ? "s" : ""} trouvé${allDecks.length > 1 ? "s" : ""}.`, "success");
-    renderFormatFilter(allDecks);
-    renderDecks(allDecks);
-    decksSection.hidden = false;
-  } catch (e) {
-    setStatus(`Erreur : ${escapeHtml(e.message)}`, "error");
-  } finally {
-    loadBtn.disabled = false;
-  }
-});
-
-// Le filtre date re-rend la liste à chaque changement
-dateFilter.addEventListener("change", () => renderDecks(allDecks));
-dateFilterClear.addEventListener("click", () => { dateFilter.value = ""; renderDecks(allDecks); });
-
-// "Tout cocher / décocher" agit sur les decks actuellement VISIBLES (filtre respecté)
-$("selectAll").addEventListener("click", () => {
-  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
-    c.checked = true;
-    checkedDeckIds.add(c.value);
-  });
-});
-$("selectNone").addEventListener("click", () => {
-  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
-    c.checked = false;
-    checkedDeckIds.delete(c.value);
-  });
-});
-
-// Charge tous les decks sélectionnés (avec progress feedback) → array de deck JSON Moxfield
+// ---------- pipeline d'extraction ----------
 async function loadSelectedDecks(deckCheckboxes) {
   const decks = [];
   let i = 0;
@@ -367,11 +373,6 @@ async function loadSelectedDecks(deckCheckboxes) {
   return decks;
 }
 
-// Pour les boards Moxfield directs : collecte les noms uniques par board sur tous les decks.
-// Pour "tokens" : lance le pipeline Scryfall (lecture des cartes des boards Moxfield cochés,
-// extraction all_parts, fetch des tokens) et renvoie les noms.
-// Renvoie { boardName: Map<name, totalQuantity> } pour les boards Moxfield,
-// et pour "tokens" une Map<name, 1> (1 exemplaire de chaque token type).
 async function collectByBoard(decks, boards) {
   const sections = {};
   const moxBoards = boards.filter((b) => b !== "tokens");
@@ -394,7 +395,6 @@ async function collectByBoard(decks, boards) {
   return sections;
 }
 
-// Pipeline Scryfall : depuis les cartes des boards donnés, trouve et fetche les tokens créés.
 async function fetchTokens(decks, sourceBoards) {
   const cardIds = new Set();
   for (const d of decks) {
@@ -432,7 +432,6 @@ async function runExtract(mode) {
       const sections = await collectByBoard(decks, boards);
       renderNameList(sections);
     } else {
-      // mode "images" : on rassemble toutes les cartes/tokens en un seul flux pour la grille
       const moxBoards = boards.filter((b) => b !== "tokens");
       const wantedIds = new Set();
       for (const b of moxBoards) {
@@ -453,7 +452,6 @@ async function runExtract(mode) {
         const tokens = await fetchTokens(decks, moxBoards.length ? moxBoards : ["mainboard", "commanders", "sideboard"]);
         allCards.push(...tokens);
       }
-      // dédupe par scryfall id
       const byId = new Map();
       for (const c of allCards) if (c.id && !byId.has(c.id)) byId.set(c.id, c);
       renderImages([...byId.values()], "Illustrations");
@@ -473,7 +471,6 @@ extractListBtn.addEventListener("click", () => runExtract("list"));
 extractImagesBtn.addEventListener("click", () => runExtract("images"));
 
 $("copyNames").addEventListener("click", async () => {
-  // Si on est en mode liste, copier le <pre> texte brut. Sinon, extraire les noms de la grille.
   const pre = resultBody.querySelector("pre.namelist");
   const text = pre
     ? pre.textContent
@@ -486,3 +483,7 @@ $("copyNames").addEventListener("click", async () => {
     setStatus("Impossible de copier (autorisation refusée).", "error");
   }
 });
+
+// ---------- init ----------
+installBookmarkletLink();
+loadFromCache();
