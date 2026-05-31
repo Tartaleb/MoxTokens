@@ -391,7 +391,12 @@ function renderNameList(sections) {
     const boardTotal = entries.reduce((s, [, q]) => s + q, 0);
     if (lines.length) lines.push("");
     lines.push(`== ${BOARD_LABELS[b] || b} (${entries.length} cartes, ${boardTotal} ex.) ==`);
-    for (const [name, qty] of entries) lines.push(`${qty} ${name}`);
+    // Format Moxfield : "t:NomDuToken" pour les tokens, "QTY NomDeCarte" pour le reste
+    if (b === "tokens") {
+      for (const [name] of entries) lines.push(`t:${name}`);
+    } else {
+      for (const [name, qty] of entries) lines.push(`${qty} ${name}`);
+    }
     totalLines += entries.length;
     totalCards += boardTotal;
   }
