@@ -115,12 +115,11 @@ pasteBtn.addEventListener("click", async () => {
   if (!Array.isArray(parsed) || !parsed.length) {
     setStatus("Liste vide ou format inattendu.", "error"); return;
   }
-  // Normalisation : on garde publicId, name, format, lastUpdatedAtUtc
   const decks = parsed
     .map((d) => ({
       publicId: d.publicId || d.id,
       name: d.name || "(sans nom)",
-      format: d.format || "—",
+      format: d.format || "",
       lastUpdatedAtUtc: d.lastUpdatedAtUtc || "",
     }))
     .filter((d) => d.publicId);
@@ -133,8 +132,51 @@ pasteBtn.addEventListener("click", async () => {
   renderFormatFilter(allDecks);
   renderDecks(allDecks);
   decksSection.hidden = false;
-  setStatus(`${decks.length} decks chargés et mis en cache.`, "success");
+  setStatus(`${decks.length} decks chargés. Enrichissement en cours…`, "success");
+  enrichDecks(allDecks);
 });
+
+// Le bookmarklet (DOM scrape) ne donne pas format/lastUpdatedAtUtc — on appelle
+// /v3/decks/all/{id} en parallèle (concurrence limitée) pour compléter ces champs.
+// Re-render au fil de l'eau pour que le filtre format se mette à jour automatiquement.
+async function enrichDecks(decks) {
+  const todo = decks.filter((d) => !d.format || !d.lastUpdatedAtUtc);
+  const total = todo.length;
+  if (!total) return;
+  const queue = [...todo];
+  let done = 0;
+  const CONCURRENCY = 5;
+  let lastRender = 0;
+
+  async function worker() {
+    while (queue.length) {
+      const d = queue.shift();
+      if (!d) return;
+      try {
+        const full = await loadDeck(d.publicId);
+        if (full.name) d.name = full.name;
+        if (full.format) d.format = full.format;
+        if (full.lastUpdatedAtUtc) d.lastUpdatedAtUtc = full.lastUpdatedAtUtc;
+      } catch (e) {
+        console.warn("enrich failed", d.publicId, e);
+      }
+      done++;
+      busy(`Enrichissement format/date : ${done}/${total}…`);
+      // Re-render toutes les ~10 enrichies pour ne pas thrasher le DOM
+      if (done - lastRender >= 10 || done === total) {
+        lastRender = done;
+        renderFormatFilter(decks);
+        renderDecks(decks);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  localStorage.setItem(LS_KEY, JSON.stringify(decks));
+  renderFormatFilter(decks);
+  renderDecks(decks);
+  setStatus(`Enrichissement terminé : ${total} decks complétés. Liste prête.`, "success");
+}
 
 clearBtn.addEventListener("click", () => {
   localStorage.removeItem(LS_KEY);
@@ -155,7 +197,12 @@ function renderFormatFilter(decks) {
     counts.set(f, (counts.get(f) || 0) + 1);
   }
   const formats = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  if (activeFormats === null) activeFormats = new Set(formats.map(([f]) => f));
+  if (activeFormats === null) {
+    activeFormats = new Set(formats.map(([f]) => f));
+  } else {
+    // L'enrichissement peut faire apparaître des formats au fil de l'eau — on les coche par défaut
+    for (const [f] of formats) if (!activeFormats.has(f)) activeFormats.add(f);
+  }
   for (const [f, n] of formats) {
     const label = document.createElement("label");
     label.className = "check";

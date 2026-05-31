@@ -1,100 +1,84 @@
 // Source lisible du bookmarklet MoxTokens.
-// Le fichier app.js minifie ce code et l'injecte dans le href du lien #bookmarklet
-// au chargement de la page.
+// app.js charge ce fichier au démarrage et l'injecte dans le href du lien #bookmarklet.
 //
-// Ce code tourne dans le contexte de www.moxfield.com (origin), donc :
-//   - fetch() vers api2.moxfield.com avec credentials:'include' envoie le cookie de session
-//     → la requête est authentifiée comme l'utilisateur connecté
-//   - on contourne ainsi le cap des ~62 decks de l'API publique non auth
+// Stratégie : DOM scraping de la page "Mes decks" de moxfield.com.
+// L'API publique (et même /v2/decks/search authentifié) caps à 62 decks,
+// alors qu'un user peut en avoir bien plus (130+ testé). La page web, elle,
+// affiche TOUT — donc on extrait depuis le DOM.
 //
-// Stratégies tentées dans l'ordre, résultats fusionnés par publicId :
-//   1) /v2/decks/search?authorUserNames=<user>&pageSize=100 (avec auth)
-//   2) /v2/decks/personal POST (endpoint "mes decks", existe en 405 sans auth)
-//
-// Sortie : JSON [{publicId,name,format,lastUpdatedAtUtc}, ...] copié dans le presse-papier.
+// Auto-scroll jusqu'à ce que le nombre de liens /decks/ n'augmente plus,
+// puis collecte chaque publicId + nom visible. Format/date sont enrichis
+// côté app MoxTokens via /v3/decks/all/{id} après le paste.
 
 (async function () {
   if (!location.host.endsWith("moxfield.com")) {
-    alert("Le bookmarklet MoxTokens doit être lancé depuis une page moxfield.com.");
+    alert("Lance ce bookmarklet depuis moxfield.com (idéalement /decks/personal).");
     return;
   }
 
-  const username = prompt("Username Moxfield :");
-  if (!username) return;
+  const isPersonal = location.pathname.toLowerCase().includes("/decks/personal");
+  if (!isPersonal) {
+    if (!confirm("Tu n'es pas sur /decks/personal — la collecte risque d'être incomplète.\n\nContinuer quand même ?")) return;
+  }
 
-  const seen = new Set();
-  const out = [];
-  const add = (d) => {
-    const id = d.publicId || d.id;
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    out.push({
-      publicId: id,
-      name: d.name || "(sans nom)",
-      format: d.format || "—",
-      lastUpdatedAtUtc: d.lastUpdatedAtUtc || "",
+  const collectLinks = () => {
+    const out = new Map();
+    document.querySelectorAll('a[href*="/decks/"]').forEach((a) => {
+      // /decks/<base64ish, 22 chars typique> — on rejette les URLs trop courtes (catégories)
+      const m = a.getAttribute("href").match(/\/decks\/([A-Za-z0-9_-]{15,})(?:[/?#]|$)/);
+      if (!m) return;
+      const id = m[1];
+      if (out.has(id)) return;
+      // Nom : texte du lien, ou h3/h4 le plus proche
+      const txt = (a.textContent || "").trim();
+      let name = txt && txt.length > 1 ? txt : "";
+      if (!name) {
+        const card = a.closest("article, [class*='deck-card'], [class*='DeckCard'], [class*='card']") || a.parentElement;
+        const h = card && card.querySelector("h1, h2, h3, h4, [class*='name'], [class*='title']");
+        if (h) name = (h.textContent || "").trim();
+      }
+      out.set(id, { publicId: id, name: name || "(sans nom)" });
     });
+    return out;
   };
 
-  let strat1 = 0, strat2 = 0, lastTotal = 0;
+  // Auto-scroll : on descend, on attend, on remesure. Stable = 3 ticks sans nouveau.
+  let stable = 0;
+  let prev = 0;
+  let rounds = 0;
+  while (stable < 3 && rounds < 80) {
+    rounds++;
+    window.scrollTo(0, document.body.scrollHeight);
+    await new Promise((r) => setTimeout(r, 600));
+    const count = collectLinks().size;
+    if (count === prev) stable++;
+    else { stable = 0; prev = count; }
+  }
+  // Remonte en haut pour ne pas perturber l'utilisateur
+  window.scrollTo(0, 0);
 
-  // Stratégie 1 : search authentifié paginé
-  try {
-    let page = 1;
-    while (true) {
-      const url = "https://api2.moxfield.com/v2/decks/search"
-        + "?authorUserNames=" + encodeURIComponent(username)
-        + "&pageSize=100&pageNumber=" + page
-        + "&sortType=updated&sortDirection=descending";
-      const r = await fetch(url, { credentials: "include" });
-      if (!r.ok) break;
-      const j = await r.json();
-      lastTotal = j.totalResults || lastTotal;
-      const before = out.length;
-      for (const d of (j.data || [])) add(d);
-      strat1 += (out.length - before);
-      if (page >= (j.totalPages || 1) || !(j.data || []).length) break;
-      page++;
-      if (page > 50) break;
-    }
-  } catch (e) { console.warn("[moxtokens] strat1", e); }
+  const map = collectLinks();
+  const list = [...map.values()];
 
-  // Stratégie 2 : /v2/decks/personal POST (endpoint "mes decks", auth-only)
-  try {
-    let page = 1;
-    while (true) {
-      const r = await fetch("https://api2.moxfield.com/v2/decks/personal", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pageNumber: page, pageSize: 100 }),
-      });
-      if (!r.ok) break;
-      const j = await r.json();
-      const before = out.length;
-      for (const d of (j.data || [])) add(d);
-      strat2 += (out.length - before);
-      if (page >= (j.totalPages || 1) || !(j.data || []).length) break;
-      page++;
-      if (page > 50) break;
-    }
-  } catch (e) { console.warn("[moxtokens] strat2", e); }
+  if (!list.length) {
+    alert("Aucun deck trouvé dans la page. Vérifie que tu es bien sur /decks/personal et connecté.");
+    return;
+  }
 
+  const payload = JSON.stringify(list);
   try {
-    await navigator.clipboard.writeText(JSON.stringify(out));
+    await navigator.clipboard.writeText(payload);
     alert(
-      "MoxTokens : " + out.length + " decks copiés.\n" +
-      "(search auth : " + strat1 + " nouveaux / personal : " + strat2 + " nouveaux / cap public API : " + lastTotal + ")\n\n" +
-      "Reviens sur MoxTokens et clique « Coller la liste »."
+      "MoxTokens : " + list.length + " decks copiés (auto-scroll " + rounds + " ticks).\n\n" +
+      "Reviens sur MoxTokens et clique « Coller la liste ».\n" +
+      "Format/date seront enrichis automatiquement (1 appel API par deck)."
     );
   } catch (e) {
-    // Fallback si clipboard refusé : ouvre une fenêtre avec le JSON à copier à la main
     const w = window.open("", "_blank");
     if (w) {
-      w.document.write("<pre>" + JSON.stringify(out, null, 2) + "</pre>");
-      w.document.title = "MoxTokens — " + out.length + " decks";
+      w.document.write("<title>MoxTokens — " + list.length + " decks</title><pre>" + payload.replace(/</g, "&lt;") + "</pre>");
     } else {
-      alert("Clipboard refusé et popup bloquée. Active les popups pour moxfield.com et réessaye.");
+      alert("Clipboard refusé et popup bloquée. Active les popups pour moxfield.com.");
     }
   }
 })();
