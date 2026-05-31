@@ -15,6 +15,8 @@ const decksSection = $("decksSection");
 const decksList = $("decksList");
 const boardsChoice = $("boardsChoice");
 const formatFilter = $("formatFilter");
+const dateFilter = $("dateFilter");
+const dateFilterClear = $("dateFilterClear");
 const decksVisibleCount = $("decksVisibleCount");
 const extractListBtn = $("extractList");
 const extractImagesBtn = $("extractImages");
@@ -117,7 +119,15 @@ function renderDecks(decks) {
   }
   // tri : plus récent d'abord
   const sorted = [...decks].sort((a, b) => (b.lastUpdatedAtUtc || "").localeCompare(a.lastUpdatedAtUtc || ""));
-  const filtered = sorted.filter((d) => activeFormats === null || activeFormats.has((d.format || "—").toString()));
+  const dateMin = dateFilter.value; // "YYYY-MM-DD" ou ""
+  const filtered = sorted.filter((d) => {
+    if (activeFormats !== null && !activeFormats.has((d.format || "—").toString())) return false;
+    if (dateMin) {
+      const updated = (d.lastUpdatedAtUtc || "").slice(0, 10);
+      if (!updated || updated < dateMin) return false;
+    }
+    return true;
+  });
   decksVisibleCount.textContent = filtered.length === decks.length ? decks.length : `${filtered.length} / ${decks.length}`;
 
   if (!filtered.length) {
@@ -322,6 +332,10 @@ loadBtn.addEventListener("click", async () => {
     loadBtn.disabled = false;
   }
 });
+
+// Le filtre date re-rend la liste à chaque changement
+dateFilter.addEventListener("change", () => renderDecks(allDecks));
+dateFilterClear.addEventListener("click", () => { dateFilter.value = ""; renderDecks(allDecks); });
 
 // "Tout cocher / décocher" agit sur les decks actuellement VISIBLES (filtre respecté)
 $("selectAll").addEventListener("click", () => {
