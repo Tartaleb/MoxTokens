@@ -266,10 +266,59 @@ button.ghost:hover:not(:disabled) {
   border-top: 1px solid var(--border);
 }
 
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.check:hover { border-color: var(--accent); }
+
+.check input[type="checkbox"] {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
+.check:has(input:checked) {
+  border-color: var(--primary);
+  background: rgba(107, 63, 160, 0.15);
+}
+
 .tokens {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 14px;
+}
+
+.namelist {
+  white-space: pre-wrap;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0;
+  color: var(--text);
+  max-height: 60vh;
+  overflow: auto;
+  user-select: all;
 }
 
 .token {

@@ -13,10 +13,23 @@ const loadBtn = $("loadDecks");
 const statusEl = $("status");
 const decksSection = $("decksSection");
 const decksList = $("decksList");
-const extractBtn = $("extract");
-const tokensSection = $("tokensSection");
-const tokensGrid = $("tokensGrid");
-const tokensCount = $("tokensCount");
+const boardsChoice = $("boardsChoice");
+const extractListBtn = $("extractList");
+const extractImagesBtn = $("extractImages");
+const resultSection = $("resultSection");
+const resultTitle = $("resultTitle");
+const resultCount = $("resultCount");
+const resultBody = $("resultBody");
+
+// Ordre d'affichage des sections dans la sortie "liste de noms"
+const BOARD_ORDER = ["commanders", "mainboard", "sideboard", "maybeboard"];
+const BOARD_LABELS = {
+  commanders: "Commanders",
+  mainboard: "Mainboard",
+  sideboard: "Sideboard",
+  maybeboard: "Maybeboard",
+  tokens: "Tokens",
+};
 
 let allDecks = [];
 
@@ -69,7 +82,8 @@ function renderDecks(decks) {
   decksList.innerHTML = "";
   if (!decks.length) {
     decksList.innerHTML = `<p class="micro">Aucun deck public trouvé pour cet utilisateur.</p>`;
-    extractBtn.disabled = true;
+    extractListBtn.disabled = true;
+    extractImagesBtn.disabled = true;
     return;
   }
   // tri : plus récent d'abord
@@ -90,7 +104,8 @@ function renderDecks(decks) {
     `;
     decksList.appendChild(label);
   }
-  extractBtn.disabled = false;
+  extractListBtn.disabled = false;
+  extractImagesBtn.disabled = false;
 }
 
 function escapeHtml(s) {
@@ -151,30 +166,53 @@ function tokenIdsFromCards(cards) {
   return [...ids];
 }
 
-function tokenImage(t) {
-  if (t.image_uris && t.image_uris.normal) return t.image_uris.normal;
-  if (t.card_faces && t.card_faces[0] && t.card_faces[0].image_uris && t.card_faces[0].image_uris.normal) {
-    return t.card_faces[0].image_uris.normal;
+function cardImage(c) {
+  if (c.image_uris && c.image_uris.normal) return c.image_uris.normal;
+  if (c.card_faces && c.card_faces[0] && c.card_faces[0].image_uris && c.card_faces[0].image_uris.normal) {
+    return c.card_faces[0].image_uris.normal;
   }
   return null;
 }
 
-function renderTokens(tokens) {
-  tokensGrid.innerHTML = "";
-  tokensCount.textContent = tokens.length;
-  if (!tokens.length) {
-    tokensGrid.innerHTML = `<p class="micro">Aucun token trouvé dans les decks sélectionnés.</p>`;
+// Lit les cartes d'un board Moxfield (mainboard, sideboard, etc.) → array {name, scryfall_id}
+function cardsFromBoard(deck, boardName) {
+  const board = (deck.boards || {})[boardName];
+  if (!board || !board.cards) return [];
+  const out = [];
+  for (const entry of Object.values(board.cards)) {
+    const c = entry && entry.card;
+    if (!c) continue;
+    out.push({ name: c.name, scryfall_id: c.scryfall_id });
+  }
+  return out;
+}
+
+function selectedBoards() {
+  return [...boardsChoice.querySelectorAll('input[type="checkbox"]:checked')].map((c) => c.value);
+}
+function selectedDeckCheckboxes() {
+  return [...decksList.querySelectorAll('input[type="checkbox"]:checked')];
+}
+
+// Rendu : grille d'illustrations
+function renderImages(cards, title) {
+  resultTitle.firstChild.textContent = title + " ";
+  resultCount.textContent = cards.length;
+  resultBody.innerHTML = "";
+  if (!cards.length) {
+    resultBody.innerHTML = `<p class="micro">Rien à afficher.</p>`;
     return;
   }
-  // tri alpha par nom
-  tokens.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-  for (const t of tokens) {
-    const card = document.createElement("div");
-    card.className = "token";
-    const img = tokenImage(t);
-    const name = escapeHtml(t.name || "(token)");
-    const sub = escapeHtml((t.type_line || t.colors_str || "").toString());
-    card.innerHTML = `
+  cards.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const grid = document.createElement("div");
+  grid.className = "tokens";
+  for (const c of cards) {
+    const el = document.createElement("div");
+    el.className = "token";
+    const img = cardImage(c);
+    const name = escapeHtml(c.name || "(carte)");
+    const sub = escapeHtml((c.type_line || "").toString());
+    el.innerHTML = `
       ${img
         ? `<img class="token-img" src="${img}" alt="${name}" loading="lazy" />`
         : `<div class="token-img placeholder">pas d'image</div>`}
@@ -183,8 +221,33 @@ function renderTokens(tokens) {
         ${sub ? `<div class="token-sub">${sub}</div>` : ""}
       </div>
     `;
-    tokensGrid.appendChild(card);
+    grid.appendChild(el);
   }
+  resultBody.appendChild(grid);
+}
+
+// Rendu : liste plain text, regroupée par board, dédupliquée et triée alpha
+function renderNameList(sections) {
+  // sections : { boardName: Set<name> } dans l'ordre BOARD_ORDER puis tokens
+  const lines = [];
+  let total = 0;
+  const order = [...BOARD_ORDER, "tokens"];
+  for (const b of order) {
+    const set = sections[b];
+    if (!set || !set.size) continue;
+    const names = [...set].sort((a, b) => a.localeCompare(b));
+    if (lines.length) lines.push("");
+    lines.push(`== ${BOARD_LABELS[b] || b} (${names.length}) ==`);
+    lines.push(...names);
+    total += names.length;
+  }
+  resultTitle.firstChild.textContent = "Liste ";
+  resultCount.textContent = total;
+  resultBody.innerHTML = "";
+  const pre = document.createElement("pre");
+  pre.className = "namelist";
+  pre.textContent = lines.length ? lines.join("\n") : "(vide)";
+  resultBody.appendChild(pre);
 }
 
 // ---------- événements UI ----------
@@ -194,7 +257,7 @@ loadBtn.addEventListener("click", async () => {
   localStorage.setItem("moxtokens.username", username);
   loadBtn.disabled = true;
   decksSection.hidden = true;
-  tokensSection.hidden = true;
+  resultSection.hidden = true;
   try {
     busy(`Chargement des decks de <strong>${escapeHtml(username)}</strong>…`);
     allDecks = await loadAllDecks(username);
@@ -215,67 +278,131 @@ $("selectNone").addEventListener("click", () => {
   decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => (c.checked = false));
 });
 
-extractBtn.addEventListener("click", async () => {
-  const selected = [...decksList.querySelectorAll('input[type="checkbox"]:checked')];
-  if (!selected.length) { setStatus("Coche au moins un deck.", "error"); return; }
-  extractBtn.disabled = true;
-  tokensSection.hidden = true;
-  try {
-    // 1) charger chaque deck via le proxy Moxfield et collecter les scryfall_id uniques
-    const allCardIds = new Set();
-    let i = 0;
-    for (const cb of selected) {
-      i++;
-      busy(`Deck ${i}/${selected.length} : <em>${escapeHtml(cb.dataset.name || "")}</em>`);
-      try {
-        const deck = await loadDeck(cb.value);
-        for (const id of scryfallIdsFromDeck(deck)) allCardIds.add(id);
-      } catch (e) {
-        console.warn("deck failed", cb.value, e);
+// Charge tous les decks sélectionnés (avec progress feedback) → array de deck JSON Moxfield
+async function loadSelectedDecks(deckCheckboxes) {
+  const decks = [];
+  let i = 0;
+  for (const cb of deckCheckboxes) {
+    i++;
+    busy(`Deck ${i}/${deckCheckboxes.length} : <em>${escapeHtml(cb.dataset.name || "")}</em>`);
+    try {
+      decks.push(await loadDeck(cb.value));
+    } catch (e) {
+      console.warn("deck failed", cb.value, e);
+    }
+  }
+  return decks;
+}
+
+// Pour les boards Moxfield directs : collecte les noms uniques par board sur tous les decks.
+// Pour "tokens" : lance le pipeline Scryfall (lecture des cartes des boards Moxfield cochés,
+// extraction all_parts, fetch des tokens) et renvoie les noms.
+async function collectByBoard(decks, boards) {
+  const sections = {};
+  const moxBoards = boards.filter((b) => b !== "tokens");
+  for (const b of moxBoards) {
+    sections[b] = new Set();
+    for (const d of decks) {
+      for (const c of cardsFromBoard(d, b)) {
+        if (c.name) sections[b].add(c.name);
       }
     }
-    const cardIds = [...allCardIds];
-    if (!cardIds.length) {
-      setStatus("Aucune carte trouvée dans les decks sélectionnés.", "error");
-      return;
+  }
+  if (boards.includes("tokens")) {
+    const tokens = await fetchTokens(decks, moxBoards.length ? moxBoards : ["mainboard", "commanders", "sideboard"]);
+    sections.tokens = new Set(tokens.map((t) => t.name).filter(Boolean));
+  }
+  return sections;
+}
+
+// Pipeline Scryfall : depuis les cartes des boards donnés, trouve et fetche les tokens créés.
+async function fetchTokens(decks, sourceBoards) {
+  const cardIds = new Set();
+  for (const d of decks) {
+    for (const b of sourceBoards) {
+      for (const c of cardsFromBoard(d, b)) {
+        if (c.scryfall_id) cardIds.add(c.scryfall_id);
+      }
+    }
+  }
+  if (!cardIds.size) return [];
+  busy(`Scryfall : lecture de ${cardIds.size} cartes…`);
+  const cards = await scryfallCollection([...cardIds], (done, total) =>
+    busy(`Scryfall : ${done}/${total} cartes lues…`));
+  const tokenIds = tokenIdsFromCards(cards);
+  if (!tokenIds.length) return [];
+  busy(`Scryfall : récupération de ${tokenIds.length} tokens…`);
+  return scryfallCollection(tokenIds, (done, total) =>
+    busy(`Scryfall : ${done}/${total} tokens lus…`));
+}
+
+async function runExtract(mode) {
+  const decksSel = selectedDeckCheckboxes();
+  const boards = selectedBoards();
+  if (!decksSel.length) { setStatus("Coche au moins un deck.", "error"); return; }
+  if (!boards.length) { setStatus("Coche au moins un type de carte à inclure.", "error"); return; }
+
+  extractListBtn.disabled = true;
+  extractImagesBtn.disabled = true;
+  resultSection.hidden = true;
+
+  try {
+    const decks = await loadSelectedDecks(decksSel);
+
+    if (mode === "list") {
+      const sections = await collectByBoard(decks, boards);
+      renderNameList(sections);
+    } else {
+      // mode "images" : on rassemble toutes les cartes/tokens en un seul flux pour la grille
+      const moxBoards = boards.filter((b) => b !== "tokens");
+      const wantedIds = new Set();
+      for (const b of moxBoards) {
+        for (const d of decks) {
+          for (const c of cardsFromBoard(d, b)) {
+            if (c.scryfall_id) wantedIds.add(c.scryfall_id);
+          }
+        }
+      }
+      const allCards = [];
+      if (wantedIds.size) {
+        busy(`Scryfall : lecture de ${wantedIds.size} cartes pour images…`);
+        const fetched = await scryfallCollection([...wantedIds], (done, total) =>
+          busy(`Scryfall : ${done}/${total} cartes lues…`));
+        allCards.push(...fetched);
+      }
+      if (boards.includes("tokens")) {
+        const tokens = await fetchTokens(decks, moxBoards.length ? moxBoards : ["mainboard", "commanders", "sideboard"]);
+        allCards.push(...tokens);
+      }
+      // dédupe par scryfall id
+      const byId = new Map();
+      for (const c of allCards) if (c.id && !byId.has(c.id)) byId.set(c.id, c);
+      renderImages([...byId.values()], "Illustrations");
     }
 
-    // 2) Scryfall bulk : récup des cartes pour lire all_parts (related tokens)
-    busy(`Scryfall : lecture de ${cardIds.length} cartes…`);
-    const cards = await scryfallCollection(cardIds, (done, total) => {
-      busy(`Scryfall : ${done}/${total} cartes lues…`);
-    });
-
-    // 3) extraire les scryfall_id de tous les tokens référencés
-    const tokenIds = tokenIdsFromCards(cards);
-    if (!tokenIds.length) {
-      renderTokens([]);
-      setStatus("Aucun token référencé par les cartes des decks sélectionnés.", "success");
-      tokensSection.hidden = false;
-      return;
-    }
-
-    // 4) Scryfall bulk : récup des tokens eux-mêmes (nom + image)
-    busy(`Scryfall : récupération de ${tokenIds.length} tokens…`);
-    const tokens = await scryfallCollection(tokenIds, (done, total) => {
-      busy(`Scryfall : ${done}/${total} tokens lus…`);
-    });
-
-    renderTokens(tokens);
-    setStatus(`${tokens.length} token${tokens.length > 1 ? "s uniques extraits" : " unique extrait"} depuis ${selected.length} deck${selected.length > 1 ? "s" : ""} (${cardIds.length} cartes analysées).`, "success");
-    tokensSection.hidden = false;
+    setStatus(`Extraction terminée sur ${decksSel.length} deck${decksSel.length > 1 ? "s" : ""}.`, "success");
+    resultSection.hidden = false;
   } catch (e) {
     setStatus(`Erreur : ${escapeHtml(e.message)}`, "error");
   } finally {
-    extractBtn.disabled = false;
+    extractListBtn.disabled = false;
+    extractImagesBtn.disabled = false;
   }
-});
+}
+
+extractListBtn.addEventListener("click", () => runExtract("list"));
+extractImagesBtn.addEventListener("click", () => runExtract("images"));
 
 $("copyNames").addEventListener("click", async () => {
-  const names = [...tokensGrid.querySelectorAll(".token-name")].map((n) => n.textContent).join("\n");
+  // Si on est en mode liste, copier le <pre> texte brut. Sinon, extraire les noms de la grille.
+  const pre = resultBody.querySelector("pre.namelist");
+  const text = pre
+    ? pre.textContent
+    : [...resultBody.querySelectorAll(".token-name")].map((n) => n.textContent).join("\n");
+  if (!text) { setStatus("Rien à copier.", "error"); return; }
   try {
-    await navigator.clipboard.writeText(names);
-    setStatus("Noms copiés dans le presse-papier.", "success");
+    await navigator.clipboard.writeText(text);
+    setStatus("Copié dans le presse-papier.", "success");
   } catch {
     setStatus("Impossible de copier (autorisation refusée).", "error");
   }

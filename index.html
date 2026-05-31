@@ -37,19 +37,32 @@
       </div>
     </div>
     <div id="decksList" class="decks"></div>
+
+    <div class="field" style="margin-top:14px">
+      <span class="label">Inclure</span>
+      <div class="checks" id="boardsChoice">
+        <label class="check"><input type="checkbox" value="commanders" checked /><span>Commanders</span></label>
+        <label class="check"><input type="checkbox" value="mainboard" checked /><span>Mainboard</span></label>
+        <label class="check"><input type="checkbox" value="sideboard" /><span>Sideboard</span></label>
+        <label class="check"><input type="checkbox" value="maybeboard" /><span>Maybeboard</span></label>
+        <label class="check"><input type="checkbox" value="tokens" checked /><span>Tokens (créés)</span></label>
+      </div>
+    </div>
+
     <div class="footer-actions">
-      <button id="extract" type="button" class="primary">Extraire les tokens</button>
+      <button id="extractList" type="button">Liste de noms</button>
+      <button id="extractImages" type="button" class="primary">Illustrations</button>
     </div>
   </section>
 
-  <section id="tokensSection" class="card" hidden>
+  <section id="resultSection" class="card" hidden>
     <div class="section-head">
-      <h2>Tokens <span id="tokensCount" class="badge"></span></h2>
+      <h2 id="resultTitle">Résultat <span id="resultCount" class="badge"></span></h2>
       <div class="actions">
         <button id="copyNames" type="button" class="ghost">Copier les noms</button>
       </div>
     </div>
-    <div id="tokensGrid" class="tokens"></div>
+    <div id="resultBody"></div>
   </section>
 
   <footer class="legal">
