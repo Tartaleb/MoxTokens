@@ -48,10 +48,13 @@ async function proxyFetch(moxPath) {
 
 // ---------- 1. lister les decks d'un user ----------
 async function loadAllDecks(username) {
+  // L'endpoint /v2/users/{name}/decks est cassé (404) côté Moxfield depuis 2026.
+  // On passe par le moteur de recherche /v2/decks/search?authorUserNames=... qui renvoie
+  // le même format paginé (data[], totalPages, etc.) et n'a pas le bug.
   const out = [];
   let page = 1;
   while (true) {
-    const data = await proxyFetch(`/v2/users/${encodeURIComponent(username)}/decks?pageSize=100&pageNumber=${page}`);
+    const data = await proxyFetch(`/v2/decks/search?pageSize=100&pageNumber=${page}&authorUserNames=${encodeURIComponent(username)}`);
     const rows = data.data || [];
     out.push(...rows);
     const total = data.totalPages || 1;
