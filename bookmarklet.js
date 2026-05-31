@@ -14,6 +14,52 @@
     return;
   }
 
+  // ---------- récup du token JWT depuis localStorage/sessionStorage ----------
+  // Moxfield (comme beaucoup de SPA) stocke un Bearer token et l'envoie en header
+  // Authorization. credentials:'include' ne suffit donc pas. On scanne les storages
+  // pour trouver une chaîne ressemblant à un JWT ("eyJ..."), ou un objet JSON qui
+  // en contient une dans un champ token/access_token/etc.
+  function findToken() {
+    const isJwt = (s) => typeof s === "string" && /^eyJ[\w-]+\.[\w-]+\.[\w-]+/.test(s);
+    const tokenFields = ["access_token", "accessToken", "token", "jwt", "bearerToken", "authToken", "id_token", "idToken"];
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        const val = storage.getItem(key);
+        if (!val) continue;
+        if (isJwt(val)) { console.log("[MoxTokens] token trouvé directement dans", storage === localStorage ? "localStorage" : "sessionStorage", "clé:", key); return val; }
+        try {
+          const obj = JSON.parse(val);
+          if (!obj || typeof obj !== "object") continue;
+          for (const f of tokenFields) {
+            if (isJwt(obj[f])) { console.log("[MoxTokens] token trouvé dans", storage === localStorage ? "localStorage" : "sessionStorage", "clé:", key, "champ:", f); return obj[f]; }
+          }
+          // Recherche récursive 1 niveau (au cas où c'est nested)
+          for (const k of Object.keys(obj)) {
+            const sub = obj[k];
+            if (sub && typeof sub === "object") {
+              for (const f of tokenFields) {
+                if (isJwt(sub[f])) { console.log("[MoxTokens] token trouvé dans", storage === localStorage ? "localStorage" : "sessionStorage", "clé:", key, "->", k, ".", f); return sub[f]; }
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+    return null;
+  }
+
+  const TOKEN = findToken();
+  if (!TOKEN) {
+    console.warn("[MoxTokens] aucun token JWT trouvé dans localStorage/sessionStorage. Vérifie que tu es bien connecté à moxfield.com.");
+  }
+
+  function authedFetch(url) {
+    const headers = { "Accept": "application/json" };
+    if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+    return fetch(url, { credentials: "include", headers });
+  }
+
   // ---------- stratégie 1 : /v3/decks récursif ----------
   async function fetchViaApi() {
     const seen = new Set();
@@ -35,7 +81,7 @@
         const params = new URLSearchParams({ pageSize: "100", pageNumber: String(page) });
         if (folderId) params.set("folderId", folderId);
         const url = "https://api2.moxfield.com/v3/decks?" + params.toString();
-        const r = await fetch(url, { credentials: "include" });
+        const r = await authedFetch(url);
         if (!r.ok) {
           if (page === 1 && folderId === null) throw new Error("HTTP " + r.status);
           break;
