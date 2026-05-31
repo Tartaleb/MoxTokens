@@ -101,11 +101,23 @@
               console.log("[MoxTokens] bootstrap." + k + " (" + typeof v + ") :", Array.isArray(v) ? "array[" + v.length + "]" : v);
             }
           }
-          // Champs typiques d'un token
-          const candidate = j.token || j.accessToken || j.access_token || j.refresh || j.refreshToken || j.bearerToken || (j.user && j.user.token);
-          if (typeof candidate === "string" && candidate.length > 20) {
-            console.log("[MoxTokens] candidat token extrait de la réponse bootstrap (longueur " + candidate.length + ")");
-            return candidate;
+          // Champs typiques d'un token. Moxfield stocke le JWT à bootstrap.refresh.access_token
+          // (avec token_type:"Bearer", refresh_token, user_name, etc. dans le même objet).
+          const candidates = [
+            j.refresh && j.refresh.access_token,
+            j.token,
+            j.accessToken,
+            j.access_token,
+            j.refreshToken,
+            j.bearerToken,
+            j.user && j.user.token,
+            typeof j.refresh === "string" ? j.refresh : null,
+          ];
+          for (const c of candidates) {
+            if (typeof c === "string" && c.length > 20) {
+              console.log("[MoxTokens] JWT extrait du bootstrap (longueur " + c.length + ")");
+              return c;
+            }
           }
         }
       }
