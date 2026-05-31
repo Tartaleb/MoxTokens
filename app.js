@@ -98,56 +98,63 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-// ---------- 2. extraire les tokens d'un deck ----------
+// ---------- 2. récupérer les decks + leurs cartes ----------
 async function loadDeck(publicId) {
   return proxyFetch(`/v3/decks/all/${encodeURIComponent(publicId)}`);
 }
 
-// Un token Moxfield/Scryfall a souvent : id (scryfall_id), name, type_line, image_uris.normal,
-// card_faces[].image_uris.normal (pour double-face), oracle_id.
-// On dédupe par "key" = oracle_id ou name + type_line.
-function extractTokensFromDeck(deck) {
-  const found = [];
-
-  // Cas v3 : un board "tokens" listant déjà les tokens du deck
-  const boards = deck.boards || {};
-  const tokensBoard = boards.tokens;
-  if (tokensBoard && tokensBoard.cards) {
-    for (const entry of Object.values(tokensBoard.cards)) {
-      if (entry && entry.card) found.push(entry.card);
-    }
-  }
-
-  // Cas fallback : pour chaque carte de chaque board, lire card.tokens[]
-  for (const [boardName, board] of Object.entries(boards)) {
-    if (boardName === "tokens" || !board || !board.cards) continue;
+function scryfallIdsFromDeck(deck) {
+  // Récupère les scryfall_id de toutes les cartes de tous les boards (mainboard, sideboard, etc.)
+  // Moxfield ne nous donne pas les tokens directement — il faut passer par Scryfall ensuite.
+  const ids = new Set();
+  for (const board of Object.values(deck.boards || {})) {
+    if (!board || !board.cards) continue;
     for (const entry of Object.values(board.cards)) {
-      const card = entry && entry.card;
-      if (!card) continue;
-      if (Array.isArray(card.tokens)) {
-        for (const t of card.tokens) found.push(t);
-      }
+      const sid = entry && entry.card && entry.card.scryfall_id;
+      if (sid) ids.add(sid);
     }
   }
-
-  return found;
+  return [...ids];
 }
 
-function tokenKey(t) {
-  return t.oracle_id || t.scryfall_id || t.id || `${t.name}|${t.type_line || ""}`;
+// ---------- 3. Scryfall : bulk lookup + related-parts ----------
+// /cards/collection accepte jusqu'à 75 identifiers par requête (POST JSON).
+async function scryfallCollection(ids, onProgress) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 75) {
+    const chunk = ids.slice(i, i + 75);
+    const r = await fetch("https://api.scryfall.com/cards/collection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifiers: chunk.map((id) => ({ id })) }),
+    });
+    if (!r.ok) throw new Error(`Scryfall ${r.status}`);
+    const data = await r.json();
+    out.push(...(data.data || []));
+    if (onProgress) onProgress(Math.min(i + 75, ids.length), ids.length);
+    if (i + 75 < ids.length) await new Promise((res) => setTimeout(res, 100));
+  }
+  return out;
+}
+
+// Pour chaque carte récupérée, regarde all_parts[] : on garde les entrées component === "token"
+// (ainsi que "combo_piece" qui est parfois utilisé pour des emblèmes / faces alt).
+function tokenIdsFromCards(cards) {
+  const ids = new Set();
+  for (const c of cards) {
+    if (!Array.isArray(c.all_parts)) continue;
+    for (const p of c.all_parts) {
+      if (!p.id || p.id === c.id) continue;
+      if (p.component === "token") ids.add(p.id);
+    }
+  }
+  return [...ids];
 }
 
 function tokenImage(t) {
-  // Moxfield embarque souvent image_normal direct, ou image_uris.normal façon Scryfall
-  if (t.image_normal) return t.image_normal;
   if (t.image_uris && t.image_uris.normal) return t.image_uris.normal;
   if (t.card_faces && t.card_faces[0] && t.card_faces[0].image_uris && t.card_faces[0].image_uris.normal) {
     return t.card_faces[0].image_uris.normal;
-  }
-  // Construire URL depuis Scryfall id
-  const sid = t.scryfall_id || t.id;
-  if (sid && /^[0-9a-f-]{36}$/i.test(sid)) {
-    return `https://api.scryfall.com/cards/${sid}?format=image&version=normal`;
   }
   return null;
 }
@@ -214,28 +221,48 @@ extractBtn.addEventListener("click", async () => {
   extractBtn.disabled = true;
   tokensSection.hidden = true;
   try {
-    busy(`Extraction des tokens de ${selected.length} deck${selected.length > 1 ? "s" : ""}…`);
-    const all = [];
+    // 1) charger chaque deck via le proxy Moxfield et collecter les scryfall_id uniques
+    const allCardIds = new Set();
     let i = 0;
     for (const cb of selected) {
       i++;
       busy(`Deck ${i}/${selected.length} : <em>${escapeHtml(cb.dataset.name || "")}</em>`);
       try {
         const deck = await loadDeck(cb.value);
-        all.push(...extractTokensFromDeck(deck));
+        for (const id of scryfallIdsFromDeck(deck)) allCardIds.add(id);
       } catch (e) {
         console.warn("deck failed", cb.value, e);
       }
     }
-    // dédupe
-    const map = new Map();
-    for (const t of all) {
-      const k = tokenKey(t);
-      if (!map.has(k)) map.set(k, t);
+    const cardIds = [...allCardIds];
+    if (!cardIds.length) {
+      setStatus("Aucune carte trouvée dans les decks sélectionnés.", "error");
+      return;
     }
-    const uniq = [...map.values()];
-    renderTokens(uniq);
-    setStatus(`${uniq.length} token${uniq.length > 1 ? "s uniques extraits" : " unique extrait"} depuis ${selected.length} deck${selected.length > 1 ? "s" : ""}.`, "success");
+
+    // 2) Scryfall bulk : récup des cartes pour lire all_parts (related tokens)
+    busy(`Scryfall : lecture de ${cardIds.length} cartes…`);
+    const cards = await scryfallCollection(cardIds, (done, total) => {
+      busy(`Scryfall : ${done}/${total} cartes lues…`);
+    });
+
+    // 3) extraire les scryfall_id de tous les tokens référencés
+    const tokenIds = tokenIdsFromCards(cards);
+    if (!tokenIds.length) {
+      renderTokens([]);
+      setStatus("Aucun token référencé par les cartes des decks sélectionnés.", "success");
+      tokensSection.hidden = false;
+      return;
+    }
+
+    // 4) Scryfall bulk : récup des tokens eux-mêmes (nom + image)
+    busy(`Scryfall : récupération de ${tokenIds.length} tokens…`);
+    const tokens = await scryfallCollection(tokenIds, (done, total) => {
+      busy(`Scryfall : ${done}/${total} tokens lus…`);
+    });
+
+    renderTokens(tokens);
+    setStatus(`${tokens.length} token${tokens.length > 1 ? "s uniques extraits" : " unique extrait"} depuis ${selected.length} deck${selected.length > 1 ? "s" : ""} (${cardIds.length} cartes analysées).`, "success");
     tokensSection.hidden = false;
   } catch (e) {
     setStatus(`Erreur : ${escapeHtml(e.message)}`, "error");
