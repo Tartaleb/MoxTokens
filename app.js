@@ -14,6 +14,8 @@ const statusEl = $("status");
 const decksSection = $("decksSection");
 const decksList = $("decksList");
 const boardsChoice = $("boardsChoice");
+const formatFilter = $("formatFilter");
+const decksVisibleCount = $("decksVisibleCount");
 const extractListBtn = $("extractList");
 const extractImagesBtn = $("extractImages");
 const resultSection = $("resultSection");
@@ -78,31 +80,69 @@ async function loadAllDecks(username) {
   return out;
 }
 
+// État des cases à cocher conservé entre re-rendus du filtre
+const checkedDeckIds = new Set();
+// Formats actuellement actifs (cochés dans le filtre). null = tout afficher (état initial).
+let activeFormats = null;
+
+function renderFormatFilter(decks) {
+  formatFilter.innerHTML = "";
+  const counts = new Map();
+  for (const d of decks) {
+    const f = (d.format || "—").toString();
+    counts.set(f, (counts.get(f) || 0) + 1);
+  }
+  const formats = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (activeFormats === null) activeFormats = new Set(formats.map(([f]) => f));
+  for (const [f, n] of formats) {
+    const label = document.createElement("label");
+    label.className = "check";
+    label.innerHTML = `<input type="checkbox" value="${escapeAttr(f)}" ${activeFormats.has(f) ? "checked" : ""} /><span>${escapeHtml(f)} (${n})</span>`;
+    label.querySelector("input").addEventListener("change", (e) => {
+      if (e.target.checked) activeFormats.add(f); else activeFormats.delete(f);
+      renderDecks(allDecks);
+    });
+    formatFilter.appendChild(label);
+  }
+}
+
 function renderDecks(decks) {
   decksList.innerHTML = "";
   if (!decks.length) {
     decksList.innerHTML = `<p class="micro">Aucun deck public trouvé pour cet utilisateur.</p>`;
+    decksVisibleCount.textContent = "";
     extractListBtn.disabled = true;
     extractImagesBtn.disabled = true;
     return;
   }
   // tri : plus récent d'abord
-  decks.sort((a, b) => (b.lastUpdatedAtUtc || "").localeCompare(a.lastUpdatedAtUtc || ""));
-  for (const d of decks) {
-    const id = d.publicId || d.id;
-    if (!id) continue;
-    const label = document.createElement("label");
-    label.className = "deck";
-    const fmt = (d.format || "—").toString();
-    const updated = (d.lastUpdatedAtUtc || "").slice(0, 10);
-    label.innerHTML = `
-      <input type="checkbox" value="${id}" data-name="${escapeAttr(d.name || "(sans nom)")}" />
-      <div class="deck-info">
-        <div class="deck-name">${escapeHtml(d.name || "(sans nom)")}</div>
-        <div class="deck-meta">${escapeHtml(fmt)}${updated ? " • maj " + updated : ""}</div>
-      </div>
-    `;
-    decksList.appendChild(label);
+  const sorted = [...decks].sort((a, b) => (b.lastUpdatedAtUtc || "").localeCompare(a.lastUpdatedAtUtc || ""));
+  const filtered = sorted.filter((d) => activeFormats === null || activeFormats.has((d.format || "—").toString()));
+  decksVisibleCount.textContent = filtered.length === decks.length ? decks.length : `${filtered.length} / ${decks.length}`;
+
+  if (!filtered.length) {
+    decksList.innerHTML = `<p class="micro">Aucun deck pour les formats cochés.</p>`;
+  } else {
+    for (const d of filtered) {
+      const id = d.publicId || d.id;
+      if (!id) continue;
+      const label = document.createElement("label");
+      label.className = "deck";
+      const fmt = (d.format || "—").toString();
+      const updated = (d.lastUpdatedAtUtc || "").slice(0, 10);
+      label.innerHTML = `
+        <input type="checkbox" value="${id}" data-name="${escapeAttr(d.name || "(sans nom)")}" ${checkedDeckIds.has(id) ? "checked" : ""} />
+        <div class="deck-info">
+          <div class="deck-name">${escapeHtml(d.name || "(sans nom)")}</div>
+          <div class="deck-meta">${escapeHtml(fmt)}${updated ? " • maj " + updated : ""}</div>
+        </div>
+      `;
+      const cb = label.querySelector("input");
+      cb.addEventListener("change", () => {
+        if (cb.checked) checkedDeckIds.add(id); else checkedDeckIds.delete(id);
+      });
+      decksList.appendChild(label);
+    }
   }
   extractListBtn.disabled = false;
   extractImagesBtn.disabled = false;
@@ -190,8 +230,13 @@ function cardsFromBoard(deck, boardName) {
 function selectedBoards() {
   return [...boardsChoice.querySelectorAll('input[type="checkbox"]:checked')].map((c) => c.value);
 }
+// Renvoie la liste des decks cochés (depuis l'état persistant, pas seulement le DOM visible)
+// pour que la sélection survive aux re-rendus du filtre par format.
 function selectedDeckCheckboxes() {
-  return [...decksList.querySelectorAll('input[type="checkbox"]:checked')];
+  return [...checkedDeckIds].map((id) => {
+    const d = allDecks.find((x) => (x.publicId || x.id) === id);
+    return { value: id, dataset: { name: (d && d.name) || "(sans nom)" } };
+  });
 }
 
 // Rendu : grille d'illustrations
@@ -261,10 +306,14 @@ loadBtn.addEventListener("click", async () => {
   loadBtn.disabled = true;
   decksSection.hidden = true;
   resultSection.hidden = true;
+  // reset entre deux chargements
+  checkedDeckIds.clear();
+  activeFormats = null;
   try {
     busy(`Chargement des decks de <strong>${escapeHtml(username)}</strong>…`);
     allDecks = await loadAllDecks(username);
     setStatus(`${allDecks.length} deck${allDecks.length > 1 ? "s" : ""} public${allDecks.length > 1 ? "s" : ""} trouvé${allDecks.length > 1 ? "s" : ""}.`, "success");
+    renderFormatFilter(allDecks);
     renderDecks(allDecks);
     decksSection.hidden = false;
   } catch (e) {
@@ -274,11 +323,18 @@ loadBtn.addEventListener("click", async () => {
   }
 });
 
+// "Tout cocher / décocher" agit sur les decks actuellement VISIBLES (filtre respecté)
 $("selectAll").addEventListener("click", () => {
-  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => (c.checked = true));
+  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = true;
+    checkedDeckIds.add(c.value);
+  });
 });
 $("selectNone").addEventListener("click", () => {
-  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => (c.checked = false));
+  decksList.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = false;
+    checkedDeckIds.delete(c.value);
+  });
 });
 
 // Charge tous les decks sélectionnés (avec progress feedback) → array de deck JSON Moxfield

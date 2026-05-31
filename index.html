@@ -29,11 +29,15 @@
 
   <section id="decksSection" class="card" hidden>
     <div class="section-head">
-      <h2>Decks</h2>
+      <h2>Decks <span id="decksVisibleCount" class="badge"></span></h2>
       <div class="actions">
         <button id="selectAll" type="button" class="ghost">Tout cocher</button>
         <button id="selectNone" type="button" class="ghost">Tout décocher</button>
       </div>
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <span class="label">Filtrer par format</span>
+      <div class="checks" id="formatFilter"></div>
     </div>
     <div id="decksList" class="decks"></div>
 
