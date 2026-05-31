@@ -90,12 +90,21 @@
       console.log("[MoxTokens] bootstrap /v1/startup/authenticated :", r.status);
       if (r.ok) {
         const j = await r.json().catch(() => null);
-        if (j) console.log("[MoxTokens] bootstrap réponse (clés) :", Object.keys(j));
-        // Cherche un token éventuellement dans la réponse pour les calls suivants
-        if (j && !TOKEN) {
-          const candidate = j.token || j.accessToken || j.access_token || (j.user && j.user.token);
+        if (j) {
+          console.log("[MoxTokens] bootstrap réponse complète :", j);
+          // Inspection des valeurs ressemblant à un token
+          for (const k of Object.keys(j)) {
+            const v = j[k];
+            if (typeof v === "string") {
+              console.log("[MoxTokens] bootstrap." + k + " (string, " + v.length + " chars) :", v.length > 60 ? v.slice(0, 60) + "…" : v);
+            } else {
+              console.log("[MoxTokens] bootstrap." + k + " (" + typeof v + ") :", Array.isArray(v) ? "array[" + v.length + "]" : v);
+            }
+          }
+          // Champs typiques d'un token
+          const candidate = j.token || j.accessToken || j.access_token || j.refresh || j.refreshToken || j.bearerToken || (j.user && j.user.token);
           if (typeof candidate === "string" && candidate.length > 20) {
-            console.log("[MoxTokens] token extrait de la réponse bootstrap");
+            console.log("[MoxTokens] candidat token extrait de la réponse bootstrap (longueur " + candidate.length + ")");
             return candidate;
           }
         }
@@ -183,6 +192,42 @@
     return { decks: out, apiCalls, folders: visitedFolders.size };
   }
 
+  // ---------- stratégie 1bis : /v2/decks/personal POST ----------
+  async function fetchViaPersonalPost() {
+    const seen = new Set();
+    const out = [];
+    let page = 1;
+    while (true) {
+      const r = await authedFetch("https://api2.moxfield.com/v2/decks/personal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pageNumber: page, pageSize: 100 }),
+      });
+      if (!r.ok) {
+        if (page === 1) throw new Error("personal POST HTTP " + r.status);
+        break;
+      }
+      const j = await r.json().catch(() => null);
+      if (!j) break;
+      if (page === 1) console.log("[MoxTokens] /v2/decks/personal réponse (clés) :", Object.keys(j));
+      for (const d of (j.data || j.decks || [])) {
+        const id = d.publicId || d.id;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push({
+          publicId: id,
+          name: d.name || "(sans nom)",
+          format: d.format || "",
+          lastUpdatedAtUtc: d.lastUpdatedAtUtc || "",
+        });
+      }
+      if (page >= (j.totalPages || 1) || !(j.data || j.decks || []).length) break;
+      page++;
+      if (page > 50) break;
+    }
+    return out;
+  }
+
   // ---------- stratégie 2 (fallback) : DOM scrape avec auto-scroll ----------
   async function fetchViaDom() {
     const collect = () => {
@@ -210,21 +255,40 @@
   }
 
   // ---------- run ----------
-  let result, method;
+  let result, method, errors = [];
+  // 1) Tente /v3/decks
   try {
     const r = await fetchViaApi();
     result = r;
     method = "API /v3/decks (" + r.apiCalls + " appels, " + r.folders + " dossiers)";
   } catch (e) {
-    console.warn("[moxtokens] API failed:", e);
+    errors.push("v3/decks : " + e.message);
+    console.warn("[moxtokens] /v3/decks failed:", e);
+  }
+  // 2) Sinon : /v2/decks/personal POST
+  if (!result) {
+    try {
+      const decks = await fetchViaPersonalPost();
+      result = { decks };
+      method = "API /v2/decks/personal POST";
+    } catch (e) {
+      errors.push("v2/decks/personal : " + e.message);
+      console.warn("[moxtokens] /v2/decks/personal failed:", e);
+    }
+  }
+  // 3) Sinon : DOM scrape
+  if (!result) {
     try {
       const r = await fetchViaDom();
       result = r;
       method = "DOM scrape (" + r.rounds + " scroll ticks)";
-    } catch (e2) {
-      alert("MoxTokens : impossible de récupérer la liste.\nAPI : " + e.message + "\nDOM : " + e2.message);
-      return;
+    } catch (e) {
+      errors.push("DOM : " + e.message);
     }
+  }
+  if (!result) {
+    alert("MoxTokens : aucune stratégie n'a fonctionné.\n\n" + errors.join("\n"));
+    return;
   }
 
   if (!result.decks.length) {
