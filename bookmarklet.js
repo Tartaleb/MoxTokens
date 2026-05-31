@@ -51,17 +51,70 @@
 
   const TOKEN = findToken();
   if (!TOKEN) {
-    console.warn("[MoxTokens] aucun token JWT trouvé dans localStorage/sessionStorage. Vérifie que tu es bien connecté à moxfield.com.");
+    console.warn("[MoxTokens] aucun token JWT trouvé. Dump des clés stockées (sans les valeurs) :");
+    const dump = (storage, label) => {
+      const keys = [];
+      for (let i = 0; i < storage.length; i++) keys.push(storage.key(i));
+      console.warn(`[MoxTokens] ${label} (${keys.length} clés) :`, keys);
+      // Aussi : pour chaque clé, longueur de la valeur et si ça ressemble à du JSON
+      for (const k of keys) {
+        const v = storage.getItem(k) || "";
+        const preview = v.length > 80 ? v.slice(0, 80) + "…" : v;
+        const looksJson = v.startsWith("{") || v.startsWith("[");
+        console.warn(`  [${label}] "${k}" (${v.length} chars, json=${looksJson}) : ${preview}`);
+      }
+    };
+    dump(localStorage, "localStorage");
+    dump(sessionStorage, "sessionStorage");
+    console.warn("[MoxTokens] document.cookie (HttpOnly invisibles) :", document.cookie || "(vide ou tout HttpOnly)");
   }
 
-  function authedFetch(url) {
-    const headers = { "Accept": "application/json" };
-    if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
-    return fetch(url, { credentials: "include", headers });
+  function authedFetch(url, init = {}) {
+    const headers = Object.assign({ "Accept": "application/json" }, init.headers || {});
+    const tok = TOKEN || TOKEN_FROM_BOOTSTRAP;
+    if (tok) headers["Authorization"] = "Bearer " + tok;
+    return fetch(url, Object.assign({ credentials: "include" }, init, { headers }));
+  }
+
+  // Bootstrap : Moxfield appelle /v1/startup/authenticated en premier après login.
+  // Ça pourrait poser/rafraîchir un cookie de session côté api2.moxfield.com (qui est un
+  // sous-domaine différent de la page hôte) — sans ça, le cookie peut ne pas être
+  // partagé entre www.moxfield.com et api2.moxfield.com.
+  async function bootstrapSession() {
+    try {
+      const r = await authedFetch("https://api2.moxfield.com/v1/startup/authenticated", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      console.log("[MoxTokens] bootstrap /v1/startup/authenticated :", r.status);
+      if (r.ok) {
+        const j = await r.json().catch(() => null);
+        if (j) console.log("[MoxTokens] bootstrap réponse (clés) :", Object.keys(j));
+        // Cherche un token éventuellement dans la réponse pour les calls suivants
+        if (j && !TOKEN) {
+          const candidate = j.token || j.accessToken || j.access_token || (j.user && j.user.token);
+          if (typeof candidate === "string" && candidate.length > 20) {
+            console.log("[MoxTokens] token extrait de la réponse bootstrap");
+            return candidate;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[MoxTokens] bootstrap échec :", e);
+    }
+    return null;
   }
 
   // ---------- stratégie 1 : /v3/decks récursif ----------
+  let TOKEN_FROM_BOOTSTRAP = null;
   async function fetchViaApi() {
+    // Tentative de bootstrap pour activer la session côté api2.moxfield.com
+    TOKEN_FROM_BOOTSTRAP = await bootstrapSession();
+    if (TOKEN_FROM_BOOTSTRAP) {
+      // Si on a chopé un token via bootstrap, on l'utilise pour les calls suivants
+      // (override de TOKEN qui était null)
+    }
     const seen = new Set();
     const out = [];
     const folderQueue = [null]; // null = racine
